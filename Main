@@ -2,8 +2,8 @@ const axios = require('axios');
 
 // Store these keys securely
 const accessToken = 'HIDDEN';
-const shipStationApiKey = ''HIDDEN'';
-const shipStationApiSecret = ''HIDDEN'';
+const shipStationApiKey = 'HIDDEN';
+const shipStationApiSecret = 'HIDDEN';
 
 exports.main = async (event, callback) => {
   try {
@@ -38,7 +38,7 @@ async function fetchLineItems(dealId) {
 }
 
 async function fetchLineItemDetails(objectId) {
-  const url = `https://api.hubapi.com/crm/v4/objects/line_items/${objectId}`;
+  const url = `https://api.hubapi.com/crm/v4/objects/line_items/${objectId}?properties=hs_sku,name,quantity,hs_product_id`;
   try {
     const response = await axios.get(url, {
       headers: { 'Authorization': `Bearer ${accessToken}` }
@@ -46,14 +46,17 @@ async function fetchLineItemDetails(objectId) {
     const properties = response.data.properties;
     console.log(`Line item ${objectId} details:`, properties);
 
-    // Validate properties
+    // Check required properties
     if (!properties.hs_product_id || !properties.quantity) {
-      throw new Error(`Missing properties for line item ${objectId}`);
+      throw new Error(`Missing required properties for line item ${objectId}`);
     }
 
+    // Return object with the fetched properties
     return {
       productId: properties.hs_product_id,
-      quantity: properties.quantity
+      quantity: properties.quantity,
+      sku: properties.hs_sku, // SKU might be null if not set in HubSpot
+      name: properties.name // Name might be null if not set in HubSpot
     };
   } catch (error) {
     console.error(`Error fetching details for line item ${objectId}:`, error.message);
@@ -61,70 +64,25 @@ async function fetchLineItemDetails(objectId) {
   }
 }
 
-async function fetchProductDetails(productId) {
-  const searchUrl = 'https://api.hubapi.com/crm/v3/objects/products/search';
-
-  try {
-    const response = await axios.post(searchUrl, {
-      properties: ["hs_sku", "name"],
-      filterGroups: [
-        {
-          filters: [
-            {
-              value: productId,
-              propertyName: "productId",
-              operator: "EQ"
-            }
-          ]
-        }
-      ]
-    }, {
-      headers: { 'Authorization': `Bearer ${accessToken}` }
-    });
-
-    // Validate response
-    if (!response.data.results || response.data.results.length === 0) {
-      throw new Error(`No product found for ID ${productId}`);
-    }
-
-    const { hs_sku, name } = response.data.results[0].properties;
-    return {
-      sku: hs_sku,
-      name: name,
-    };
-  } catch (error) {
-    console.error(`Error fetching product details for ID ${productId}:`, error.message);
-    throw new Error(`Error fetching product details: ${error.message}`);
-  }
-}
 
 async function createShipStationPayload(dealId, dealProperties, lineItemsDetails) {
-  const today = new Date().toISOString().split('T')[0];
+  try {
+    const today = new Date().toISOString().split('T')[0];
 
-  const itemsPromises = lineItemsDetails.map(async (details) => {
-    try {
-      const { productId, quantity } = details;
-      const { sku, name } = await fetchProductDetails(productId);
-
-      // Check if SKU starts with 'H'
-      if (sku.startsWith('H')) {
+    const items = lineItemsDetails.map(details => {
+      const { sku, name, quantity } = details;
+      console.log(`Processing item - SKU: ${sku}, Name: ${name}, Quantity: ${quantity}`);
+      
+      if (sku && sku.startsWith('H')) {
         return {
           sku: sku,
           name: name,
           quantity: quantity
         };
       } else {
-        return null; // Return null if SKU does not start with 'H'
+        return null; // Exclude item if SKU does not start with 'H' or is undefined
       }
-    } catch (error) {
-      console.error('Error processing line item:', error);
-      throw error;
-    }
-  });
-  
-  try {
-    const items = (await Promise.all(itemsPromises)).filter(item => item !== null); // Filter out null items
-    console.log("Items for ShipStation:", JSON.stringify(items, null, 2));
+    }).filter(item => item !== null); // Filter out null items
 
     // Construct payload
     const dataPayload = {
@@ -162,6 +120,7 @@ async function createShipStationPayload(dealId, dealProperties, lineItemsDetails
     throw error;
   }
 }
+
 
 async function sendToShipStation(dataPayload) {
   console.log('Sending payload to ShipStation:', JSON.stringify(dataPayload, null, 2));
