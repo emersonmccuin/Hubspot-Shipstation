@@ -1,9 +1,9 @@
 const axios = require('axios');
 
 // Store these keys securely
-const accessToken = 'pat-na1-a3bac384-0268-4957-8d0c-c997914f12c2';
-const shipStationApiKey = 'da94f795685340928e9f30e61508c9b2';
-const shipStationApiSecret = 'eb8fc6be828440f7ae633c8acafd95f9';
+const accessToken = 'HIDDEN';
+const shipStationApiKey = ''HIDDEN'';
+const shipStationApiSecret = ''HIDDEN'';
 
 exports.main = async (event, callback) => {
   try {
