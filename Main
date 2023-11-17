@@ -1,0 +1,186 @@
+const axios = require('axios');
+
+// Store these keys securely
+const accessToken = 'pat-na1-a3bac384-0268-4957-8d0c-c997914f12c2';
+const shipStationApiKey = 'da94f795685340928e9f30e61508c9b2';
+const shipStationApiSecret = 'eb8fc6be828440f7ae633c8acafd95f9';
+
+exports.main = async (event, callback) => {
+  try {
+    const dealProperties = event.inputFields;
+    const dealId = event.object.objectId.toString(); // Convert to string for compatibility
+
+    console.log(`Processing deal ID: ${dealId}`);
+    const lineItems = await fetchLineItems(dealId);
+
+    const dataPayload = await createShipStationPayload(dealId, dealProperties, lineItems); // Added await
+
+    await sendToShipStation(dataPayload);
+    callback(null, "Order successfully created in ShipStation");
+  } catch (error) {
+    console.error('Error in main function:', error);
+    callback(error);
+  }
+};
+
+async function fetchLineItems(dealId) {
+  const lineItemsUrl = `https://api.hubapi.com/crm/v4/objects/deals/${dealId}/associations/line_items`;
+  try {
+    const response = await axios.get(lineItemsUrl, {
+      headers: { 'Authorization': `Bearer ${accessToken}` }
+    });
+    console.log(`Line items for deal ${dealId}:`, JSON.stringify(response.data, null, 2));
+    return await Promise.all(response.data.results.map(item => fetchLineItemDetails(item.toObjectId)));
+  } catch (error) {
+    console.error(`Error fetching line items for deal ${dealId}:`, error.message);
+    throw new Error(`Error fetching line items: ${error.message}`);
+  }
+}
+
+async function fetchLineItemDetails(objectId) {
+  const url = `https://api.hubapi.com/crm/v4/objects/line_items/${objectId}`;
+  try {
+    const response = await axios.get(url, {
+      headers: { 'Authorization': `Bearer ${accessToken}` }
+    });
+    const properties = response.data.properties;
+    console.log(`Line item ${objectId} details:`, properties);
+
+    // Validate properties
+    if (!properties.hs_product_id || !properties.quantity) {
+      throw new Error(`Missing properties for line item ${objectId}`);
+    }
+
+    return {
+      productId: properties.hs_product_id,
+      quantity: properties.quantity
+    };
+  } catch (error) {
+    console.error(`Error fetching details for line item ${objectId}:`, error.message);
+    throw new Error(`Error fetching line item details: ${error.message}`);
+  }
+}
+
+async function fetchProductDetails(productId) {
+  const searchUrl = 'https://api.hubapi.com/crm/v3/objects/products/search';
+
+  try {
+    const response = await axios.post(searchUrl, {
+      properties: ["hs_sku", "name"],
+      filterGroups: [
+        {
+          filters: [
+            {
+              value: productId,
+              propertyName: "productId",
+              operator: "EQ"
+            }
+          ]
+        }
+      ]
+    }, {
+      headers: { 'Authorization': `Bearer ${accessToken}` }
+    });
+
+    // Validate response
+    if (!response.data.results || response.data.results.length === 0) {
+      throw new Error(`No product found for ID ${productId}`);
+    }
+
+    const { hs_sku, name } = response.data.results[0].properties;
+    return {
+      sku: hs_sku,
+      name: name,
+    };
+  } catch (error) {
+    console.error(`Error fetching product details for ID ${productId}:`, error.message);
+    throw new Error(`Error fetching product details: ${error.message}`);
+  }
+}
+
+async function createShipStationPayload(dealId, dealProperties, lineItemsDetails) {
+  const today = new Date().toISOString().split('T')[0];
+
+  const itemsPromises = lineItemsDetails.map(async (details) => {
+    try {
+      const { productId, quantity } = details;
+      const { sku, name } = await fetchProductDetails(productId);
+
+      // Check if SKU starts with 'H'
+      if (sku.startsWith('H')) {
+        return {
+          sku: sku,
+          name: name,
+          quantity: quantity
+        };
+      } else {
+        return null; // Return null if SKU does not start with 'H'
+      }
+    } catch (error) {
+      console.error('Error processing line item:', error);
+      throw error;
+    }
+  });
+  
+  try {
+    const items = (await Promise.all(itemsPromises)).filter(item => item !== null); // Filter out null items
+    console.log("Items for ShipStation:", JSON.stringify(items, null, 2));
+
+    // Construct payload
+    const dataPayload = {
+      "orderNumber": dealId,
+      "orderDate": today,
+      "orderStatus": "awaiting_shipment",
+      "billTo": {
+        "name": "John Doe",
+        "company": "Acme Corp",
+        "street1": "1234 Street",
+        "city": "City",
+        "state": "State",
+        "postalCode": "12345",
+        "country": "US",
+        "phone": "111-222-3333",
+        "email": "email@example.com"
+      },
+      "shipTo": {
+        "name": dealProperties.recipient_name,
+        "street1": dealProperties.street_address_1,
+        "city": dealProperties.city,
+        "state": dealProperties.state,
+        "postalCode": dealProperties.postal_code,
+        "country": dealProperties.country,
+        "phone": dealProperties.recipient_phone_number,
+        "customerEmail": dealProperties.recipient_email
+      },
+      "items": items
+    };
+
+    console.log('Constructed payload for ShipStation:', JSON.stringify(dataPayload, null, 2));
+    return dataPayload;
+  } catch (error) {
+    console.error('Error constructing payload for ShipStation:', error);
+    throw error;
+  }
+}
+
+async function sendToShipStation(dataPayload) {
+  console.log('Sending payload to ShipStation:', JSON.stringify(dataPayload, null, 2));
+
+  const encodedCredentials = Buffer.from(`${shipStationApiKey}:${shipStationApiSecret}`).toString('base64');
+  const config = {
+    method: 'post',
+    url: 'https://ssapi.shipstation.com/orders/createorder',
+    headers: { 
+      'Authorization': `Basic ${encodedCredentials}`,
+      'Content-Type': 'application/json'
+    },
+    data: dataPayload
+  };
+
+  try {
+    await axios(config);
+  } catch (error) {
+    console.error(`Error sending payload to ShipStation:`, error.message);
+    throw new Error(`Error sending data to ShipStation: ${error.message}`);
+  }
+}
